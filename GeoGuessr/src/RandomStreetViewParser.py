@@ -7,8 +7,11 @@ import random
 import json
 import numpy as np
 import pandas as pd
+import jsonlines
 
 # import chromedriver_autoinstaller
+import pycountry
+from geopy.geocoders import Nominatim
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -17,10 +20,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
+from os import listdir
+from os.path import isfile, join
+from datetime import date
+
 from io import BytesIO
 from PIL import Image
 from fake_useragent import UserAgent
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
 class RandomStreetViewParser:
     """
@@ -37,14 +46,16 @@ class RandomStreetViewParser:
         user_agent = ua.random
         options.add_argument(f"user-agent={user_agent}")
 
+        self.geolocator = Nominatim(user_agent=str(user_agent))
+
         driver = webdriver.Chrome(executable_path=driver_path, chrome_options=options)
         self.driver = driver
 
-    # def go_fullscreen(self):
-    #     """
-    #     Go fullscreen for a simple way to remove the UI and go panoramic
-    #     """
-    #     self.driver.find_element(By.XPATH, "//*[@id='pano']/div/div[8]/button").click()
+        # TODO: TECHNICAL DEBT
+        iso = pd.read_csv("../data/utility/iso3166.csv")
+        self.name_to_iso_alpha2 = dict(zip(iso["name"], iso["alpha-2"]))
+
+        self.rundate = str(date.today()).replace("-", "")
 
     def hide_elements(self):
         js_script = """\
@@ -74,7 +85,52 @@ class RandomStreetViewParser:
         """
         Find the named address of the image from randomstreetview.com
         """
-        self.address = self.driver.find_element(By.ID, "address").text
+        raw_address = self.driver.find_element(By.ID, "address").text
+        self.raw_address = raw_address
+        self.address = raw_address.replace(",", "")
+
+    def get_gps_from_address(self):
+        """
+        Take an address from the scraper and return the latitude and longitude
+
+        return ex: TODO
+        """
+        preprocessed_address = self.address
+        try:
+            gps = self.geolocator.geocode(preprocessed_address)
+            self.latitude = gps.latitude
+            self.longitude = gps.longitude
+            coordinates = (gps.latitude, gps.longitude)
+        except Exception as e:
+            # print(f"Cannot find a gps coordinate for {self.address}")
+            coordinates = "_UNLABELED"
+            self.latitude = None
+            self.longitude = None
+
+        self.coordinates = coordinates
+
+    def get_iso_alpha2_from_address(self):
+        """
+        Take an address from the scraper and return an iso3166 country code
+        
+        return ex: TODO
+        """
+
+        def get_country_from_address(address):
+            return address.replace(".jpg", "").split(",")[-1].lstrip().rstrip()
+
+        country = get_country_from_address(self.raw_address)
+
+        try:
+            iso_alpha2 = self.name_to_iso_alpha2[country]
+        except Exception as e:
+            try:
+                iso_alpha2 = pycountry.countries.search_fuzzy(country)[0].alpha_2
+            except Exception as e:
+                iso_alpha2 = "_UNLABELED"
+                # print(f"Could not match {country} to a country")
+
+        self.iso_alpha2 = iso_alpha2
 
     def rotate_canvas(self):
         """
@@ -84,7 +140,7 @@ class RandomStreetViewParser:
         main = self.driver.find_element(By.CLASS_NAME, "gm-style")
         for _ in range(0, 3):
             action = webdriver.common.action_chains.ActionChains(self.driver)
-            
+
             # drag and click along the top to avoid hitting Google UI arrows
             action.move_to_element_with_offset(main, 250, 100).click_and_hold(
                 main
@@ -94,16 +150,58 @@ class RandomStreetViewParser:
         """
         Take a screenshot of the streetview canvas.
         """
+
+        def update_metadata(img_filename, metadata_file_path):
+            """
+            Helper function that updates the metadata file which contains
+            class labels 
+            """
+
+            img_labels = {
+                "file_name": img_filename,
+                "country_iso_alpha2": self.iso_alpha2,
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+            }
+
+            # append labels to metadata file
+            with jsonlines.open(metadata_file_path, mode="a") as appender:
+                appender.write(img_labels)
+
         # initate
         images = []
-        print(f"Beginning to scrape a panoramic from {self.address}")
+        print(
+            f"Beginning to scrape images from {self.address} from alpha2 code {self.iso_alpha2} and gps coordinates {self.coordinates}"
+        )
+        clean_coordinate = (
+            str(self.coordinates)
+            .replace("(", "")
+            .replace(")", "")
+            .replace(",", "_")
+            .replace(" ", "")
+        )
 
         # repeat: screenshot, save, rotate
         for ss in range(0, num_screenshots):
 
             # allow for screen to buffer
-            time.sleep(1)
-            raw_image_location = f"{save_location}/raw/{self.address}_{ss}.png"
+            time.sleep(2)
+
+            indv_filename = f"{self.rundate}_{self.address}_{ss}_{clean_coordinate}.png"
+            if self.iso_alpha2 == "_UNLABELED":
+                raw_image_location = f"{save_location}_indv/unlabeled/{indv_filename}"
+                update_metadata(
+                    img_filename=indv_filename,
+                    metadata_file_path=f"{save_location}_indv/unlabeled/metadata.jsonl",
+                )
+            else:
+                raw_image_location = (
+                    f"{save_location}_indv/train/{indv_filename}"
+                )
+                update_metadata(
+                    img_filename=indv_filename,
+                    metadata_file_path=f"{save_location}_indv/train/metadata.jsonl",
+                )
 
             # screenshot
             with open(raw_image_location, "xb") as f:
@@ -134,7 +232,19 @@ class RandomStreetViewParser:
         for im in images:
             new_im.paste(im, (x_offset, 0))
             x_offset += im.size[0]
-        new_im.save(
-            # f"../data/rsv/panoramic/{raw_address}.jpg"
-            f"{save_location}/panoramic/{self.address}.jpg"
-        )
+
+        pano_filename = f"{self.rundate}_{self.address}_{clean_coordinate}.jpg"
+        if self.iso_alpha2 == "_UNLABELED":
+            new_im.save(
+                f"{save_location}_pano/unlabeled/{pano_filename}"
+            )
+            update_metadata(
+                img_filename=pano_filename,
+                metadata_file_path=f"{save_location}_pano/unlabeled/metadata.jsonl",
+            )
+        else:            
+            new_im.save(f"{save_location}_pano/train/{pano_filename}")
+            update_metadata(
+                img_filename=pano_filename,
+                metadata_file_path=f"{save_location}_pano/train/metadata.jsonl",
+            )

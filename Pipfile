@@ -1,0 +1,22 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+install = "*"
+selenium = "*"
+fake-useragent = "*"
+geopy = "*"
+pycountry = "*"
+numpy = "*"
+pandas = "*"
+pillow = "*"
+jsonlines = "*"
+jupyter = "*"
+chromedriver-autoinstaller = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"

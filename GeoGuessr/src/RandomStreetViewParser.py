@@ -76,7 +76,13 @@ class RandomStreetViewParser:
         elements = document.getElementsByTagName('button');
         
         for (element of elements) {
-        element.setAttribute("hidden","");
+          element.setAttribute("hidden","");
+        } 
+
+        // Remove big arrows
+        elements = document.getElementsByTagName('svg');
+        for (element of elements) {
+          element.parentNode.removeChild(element);
         } 
         """
         self.driver.execute_script(js_script)
